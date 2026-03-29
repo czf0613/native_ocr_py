@@ -1,0 +1,38 @@
+[project]
+name = "native_ocr_py"
+version = "0.0.1"
+description = "Call macOS/Windows built-in Vision OCR engine via Python C extension"
+readme = "README.md"
+keywords = ["ocr", "vision", "macos", "windows", "c extension"]
+authors = [{ name = "Kevin Chen", email = "1354016594@qq.com" }]
+license = "MIT"
+requires-python = ">=3.11"
+classifiers = [
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[project.urls]
+Home-page = "https://github.com/czf0613/native_ocr_py"
+
+[build-system]
+requires = ["setuptools>=45.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages.find = { where = ["src"] }
+include-package-data = true
+
+[dependency-groups]
+dev = ["pytest>=7.0.1", "setuptools>=82.0.0"]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "[%(asctime)s] %(levelname)s %(message)s"
+log_cli_date_format = "%Y-%m-%dT%H:%M:%S%z"
