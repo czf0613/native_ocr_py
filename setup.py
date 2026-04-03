@@ -7,14 +7,17 @@ if sys.platform == "darwin":
     ext_modules.append(
         Extension(
             name="native_ocr.ext._ocr_native",
-            include_dirs=[],
-            sources=[],
+            include_dirs=["native_code/osx/include"],
+            sources=[
+                "native_code/osx/src/apple_ocr.m",
+                "native_code/osx/src/ocr_native.c",
+            ],
             extra_compile_args=["-fobjc-arc"],
             extra_link_args=[
-                "-framework",
-                "Vision",
-                "-framework",
-                "Foundation",
+                "-framework", "Vision",
+                "-framework", "Foundation",
+                "-framework", "CoreGraphics",
+                "-framework", "ImageIO",
             ],
         )
     )

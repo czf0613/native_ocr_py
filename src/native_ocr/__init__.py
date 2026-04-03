@@ -1,6 +1,11 @@
-from .types import OcrResult, BoundingBox
+import asyncio
+import struct
+from functools import cache, partial
+
+from .ext import detect_bgra8 as _detect_bgra8
+from .ext import detect_image as _detect_image
 from .ext import get_supported_langs
-from functools import cache
+from .types import BoundingBox, OcrResult
 
 __all__ = [
     "OcrResult",
@@ -15,8 +20,104 @@ __all__ = [
 def get_supported_languages() -> list[str]:
     """
     Return the list of language codes supported by the underlying OCR engine.
+
+    Each code follows BCP-47 / ISO 639-1 conventions (e.g. ``"en-US"``, ``"zh-Hans"``).
+    Pass these codes to the ``languages`` parameter of the OCR functions to restrict
+    or prioritise recognition to specific languages.
+
+    The result is cached after the first call.
     """
     return get_supported_langs()
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_roi(roi: BoundingBox | None) -> tuple[float, float, float, float]:
+    if roi is None:
+        return (0.0, 0.0, 1.0, 1.0)
+    return (roi.x, roi.y, roi.width, roi.height)
+
+
+def _image_size(data: bytes) -> tuple[int, int]:
+    """
+    Extract (width, height) from a PNG or JPEG byte stream without
+    any third-party dependencies.
+
+    Raises ValueError for unsupported formats or malformed headers.
+    """
+    # PNG: fixed 8-byte signature, then IHDR chunk at offset 8.
+    # Width and height are at offsets 16–20 and 20–24 respectively (big-endian).
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        w, h = struct.unpack(">II", data[16:24])
+        return w, h
+
+    # JPEG: scan for an SOF (Start Of Frame) marker.
+    if data[:2] == b"\xff\xd8":
+        i = 2
+        while i + 3 < len(data):
+            if data[i] != 0xFF:
+                break
+            marker = data[i + 1]
+            # SOF0–SOF15 (excluding DHT/DAC markers 0xC4/0xCC)
+            if marker in (
+                0xC0,
+                0xC1,
+                0xC2,
+                0xC3,
+                0xC5,
+                0xC6,
+                0xC7,
+                0xC9,
+                0xCA,
+                0xCB,
+                0xCD,
+                0xCE,
+                0xCF,
+            ):
+                # Segment layout: FF marker | 2B length | 1B precision | 2B height | 2B width
+                h, w = struct.unpack(">HH", data[i + 5 : i + 9])
+                return w, h
+            segment_len = struct.unpack(">H", data[i + 2 : i + 4])[0]
+            i += 2 + segment_len
+
+    raise ValueError(
+        "Cannot determine image dimensions for normalized=False. "
+        "Only PNG and JPEG are supported for pixel-coordinate output. "
+        "Pass normalized=True for other formats."
+    )
+
+
+def _build_results(
+    raw: list[tuple[str, float, float, float, float]],
+    normalized: bool,
+    img_width: int,
+    img_height: int,
+) -> list[OcrResult]:
+    results: list[OcrResult] = []
+    for text, x, y, w, h in raw:
+        text = text.strip()
+        if not text:
+            continue
+        if not normalized:
+            x *= img_width
+            y *= img_height
+            w *= img_width
+            h *= img_height
+        results.append(
+            OcrResult(
+                content=text,
+                position=BoundingBox(x=x, y=y, width=w, height=h),
+            )
+        )
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 async def perform_ocr_on_bgra(
@@ -59,7 +160,19 @@ async def perform_ocr_on_bgra(
         A list of ``OcrResult`` objects, each containing the recognised text and
         its bounding box. The list is empty if no text is detected.
     """
-    return []
+    roi_tuple = _parse_roi(roi)
+    langs = languages or []
+    words = custom_words or []
+
+    loop = asyncio.get_running_loop()
+    raw: list[tuple[str, float, float, float, float]] = await loop.run_in_executor(
+        None,
+        partial(
+            _detect_bgra8, bgra, width, height, roi_tuple, high_accuracy, langs, words
+        ),
+    )
+
+    return _build_results(raw, normalized, width, height)
 
 
 async def perform_ocr_on_image(
@@ -84,6 +197,7 @@ async def perform_ocr_on_image(
             ``BoundingBox`` values are normalised to the range ``[0.0, 1.0]``.
             When ``False``, coordinates are in pixels.
             All coordinate values must be ``float`` regardless of this flag.
+            Note: pixel-coordinate output is only supported for PNG and JPEG.
         roi: Optional region of interest. Only pixels within this bounding box
             are scanned. ``None`` means the full image is scanned.
         high_accuracy: When ``True``, the OCR engine applies additional
@@ -98,4 +212,15 @@ async def perform_ocr_on_image(
         A list of ``OcrResult`` objects, each containing the recognised text and
         its bounding box. The list is empty if no text is detected.
     """
-    return []
+    roi_tuple = _parse_roi(roi)
+    langs = languages or []
+    words = custom_words or []
+
+    loop = asyncio.get_running_loop()
+    raw: list[tuple[str, float, float, float, float]] = await loop.run_in_executor(
+        None,
+        partial(_detect_image, data, roi_tuple, high_accuracy, langs, words),
+    )
+
+    img_width, img_height = _image_size(data) if not normalized else (1, 1)
+    return _build_results(raw, normalized, img_width, img_height)

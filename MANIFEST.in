@@ -1,0 +1,3 @@
+# Exclude tests and local development files from the source distribution.
+# The wheel never includes these regardless (only packages under src/ are bundled).
+prune tests

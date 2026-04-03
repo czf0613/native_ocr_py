@@ -1,11 +1,20 @@
 # Python-generated files
 __pycache__/
-*.py[ocd]
-*.so
+*.py[oc]
 build/
 dist/
 wheels/
 *.egg-info
 
+# C extension build artefacts
+*.so
+*.pyd
+*.o
+*.dylib
+*.dSYM/
+
 # Virtual environments
 .venv
+
+# macOS metadata
+.DS_Store
