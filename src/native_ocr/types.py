@@ -8,9 +8,12 @@ class BoundingBox:
     """
     A rectangle in top-left-origin coordinate space.
 
-    Coordinates are either normalised (``[0.0, 1.0]``) or in pixels,
-    depending on the ``normalized`` flag passed to the OCR function.
-    All fields are ``float`` in both cases.
+    When used as an **input** (``roi`` parameter), coordinates must always be
+    normalised to ``[0.0, 1.0]``.
+
+    When used as an **output** (``OcrResult.position``), coordinates are
+    normalised or in pixels depending on the ``normalized`` flag passed to the
+    OCR function. All fields are ``float`` in both cases.
 
     Attributes:
         x: Horizontal distance from the left edge to the left side of the box.

@@ -18,5 +18,6 @@ def detect_image(
     high_accuracy: bool,
     langs: list[str],
     custom_words: list[str],
-) -> list[tuple[str, float, float, float, float]]:
+) -> tuple[list[tuple[str, float, float, float, float]], int, int]:
+    """Returns (results, image_width_px, image_height_px)."""
     pass

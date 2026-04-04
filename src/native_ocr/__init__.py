@@ -1,5 +1,4 @@
 import asyncio
-import struct
 from functools import cache, partial
 
 from .ext import detect_bgra8 as _detect_bgra8
@@ -40,54 +39,6 @@ def _parse_roi(roi: BoundingBox | None) -> tuple[float, float, float, float]:
         return (0.0, 0.0, 1.0, 1.0)
     return (roi.x, roi.y, roi.width, roi.height)
 
-
-def _image_size(data: bytes) -> tuple[int, int]:
-    """
-    Extract (width, height) from a PNG or JPEG byte stream without
-    any third-party dependencies.
-
-    Raises ValueError for unsupported formats or malformed headers.
-    """
-    # PNG: fixed 8-byte signature, then IHDR chunk at offset 8.
-    # Width and height are at offsets 16–20 and 20–24 respectively (big-endian).
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        w, h = struct.unpack(">II", data[16:24])
-        return w, h
-
-    # JPEG: scan for an SOF (Start Of Frame) marker.
-    if data[:2] == b"\xff\xd8":
-        i = 2
-        while i + 3 < len(data):
-            if data[i] != 0xFF:
-                break
-            marker = data[i + 1]
-            # SOF0–SOF15 (excluding DHT/DAC markers 0xC4/0xCC)
-            if marker in (
-                0xC0,
-                0xC1,
-                0xC2,
-                0xC3,
-                0xC5,
-                0xC6,
-                0xC7,
-                0xC9,
-                0xCA,
-                0xCB,
-                0xCD,
-                0xCE,
-                0xCF,
-            ):
-                # Segment layout: FF marker | 2B length | 1B precision | 2B height | 2B width
-                h, w = struct.unpack(">HH", data[i + 5 : i + 9])
-                return w, h
-            segment_len = struct.unpack(">H", data[i + 2 : i + 4])[0]
-            i += 2 + segment_len
-
-    raise ValueError(
-        "Cannot determine image dimensions for normalized=False. "
-        "Only PNG and JPEG are supported for pixel-coordinate output. "
-        "Pass normalized=True for other formats."
-    )
 
 
 def _build_results(
@@ -140,11 +91,12 @@ async def perform_ocr_on_bgra(
         bgra: Raw pixel data in BGRA8 format (4 bytes per pixel, no padding).
         width: Image width in pixels.
         height: Image height in pixels.
-        normalized: When ``True``, all coordinates in ``roi`` and in the returned
-            ``BoundingBox`` values are normalised to the range ``[0.0, 1.0]``.
-            When ``False``, coordinates are in pixels.
-            All coordinate values must be ``float`` regardless of this flag.
-        roi: Optional region of interest. Only pixels within this bounding box
+        normalized: Controls the coordinate space of the **returned** bounding
+            boxes only. When ``True``, result coordinates are normalised to
+            ``[0.0, 1.0]``. When ``False``, result coordinates are in pixels.
+            Does not affect ``roi``, which is always normalised.
+        roi: Optional region of interest in **normalised** ``[0.0, 1.0]``
+            coordinates (top-left origin). Only pixels within this rectangle
             are scanned. ``None`` means the full image is scanned.
         high_accuracy: When ``True``, the OCR engine applies additional
             correction passes for higher accuracy at the cost of speed.
@@ -193,12 +145,12 @@ async def perform_ocr_on_image(
     Args:
         data: Raw bytes of an encoded image file (e.g. the contents of a
             ``.jpg`` or ``.png`` file).
-        normalized: When ``True``, all coordinates in ``roi`` and in the returned
-            ``BoundingBox`` values are normalised to the range ``[0.0, 1.0]``.
-            When ``False``, coordinates are in pixels.
-            All coordinate values must be ``float`` regardless of this flag.
-            Note: pixel-coordinate output is only supported for PNG and JPEG.
-        roi: Optional region of interest. Only pixels within this bounding box
+        normalized: Controls the coordinate space of the **returned** bounding
+            boxes only. When ``True``, result coordinates are normalised to
+            ``[0.0, 1.0]``. When ``False``, result coordinates are in pixels.
+            Does not affect ``roi``, which is always normalised.
+        roi: Optional region of interest in **normalised** ``[0.0, 1.0]``
+            coordinates (top-left origin). Only pixels within this rectangle
             are scanned. ``None`` means the full image is scanned.
         high_accuracy: When ``True``, the OCR engine applies additional
             correction passes for higher accuracy at the cost of speed.
@@ -217,10 +169,9 @@ async def perform_ocr_on_image(
     words = custom_words or []
 
     loop = asyncio.get_running_loop()
-    raw: list[tuple[str, float, float, float, float]] = await loop.run_in_executor(
+    raw, img_width, img_height = await loop.run_in_executor(
         None,
         partial(_detect_image, data, roi_tuple, high_accuracy, langs, words),
     )
 
-    img_width, img_height = _image_size(data) if not normalized else (1, 1)
     return _build_results(raw, normalized, img_width, img_height)

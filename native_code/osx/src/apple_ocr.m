@@ -166,9 +166,12 @@ OcrResultList ocr_detect_image(
     double roi_x, double roi_y, double roi_w, double roi_h,
     int high_accuracy,
     const char **langs, int lang_count,
-    const char **custom_words, int word_count
+    const char **custom_words, int word_count,
+    int *out_width, int *out_height
 ) {
     OcrResultList empty = {NULL, 0};
+    *out_width  = 0;
+    *out_height = 0;
 
     NSData *nsData = [NSData dataWithBytesNoCopy:(void *)data length:data_len freeWhenDone:NO];
     CGImageSourceRef imageSource = CGImageSourceCreateWithData((__bridge CFDataRef)nsData, NULL);
@@ -177,6 +180,9 @@ OcrResultList ocr_detect_image(
     CGImageRef cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
     CFRelease(imageSource);
     if (!cgImage) return empty;
+
+    *out_width  = (int)CGImageGetWidth(cgImage);
+    *out_height = (int)CGImageGetHeight(cgImage);
 
     VNImageRequestHandler *handler = [[VNImageRequestHandler alloc]
         initWithCGImage:cgImage options:@{}];

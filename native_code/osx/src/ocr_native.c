@@ -6,30 +6,16 @@
 /* ---- Helpers -------------------------------------------------- */
 
 /*
- * Convert a Python list[str] into a heap-allocated const char** array.
- * The strings themselves point into Python's internal UTF-8 buffer and
- * must NOT be freed individually — only the array itself should be freed.
- * The Python list must remain alive for the lifetime of the returned array.
- * Returns NULL and sets a Python exception on error.
+ * Borrow UTF-8 pointers from a Python list[str] into a heap-allocated array.
+ * Caller owns the array itself but not the strings — do not free individually.
+ * The list must remain alive for the lifetime of the returned array.
  */
-static const char **parse_str_list(PyObject *list, int *out_count) {
-    if (!PyList_Check(list)) {
-        PyErr_SetString(PyExc_TypeError, "expected a list of strings");
-        return NULL;
-    }
+static const char **unpack_str_list(PyObject *list, int *out_count) {
     Py_ssize_t n = PyList_GET_SIZE(list);
     const char **arr = (const char **)malloc((n + 1) * sizeof(char *));
     if (!arr) { PyErr_NoMemory(); return NULL; }
-    for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject *item = PyList_GET_ITEM(list, i);
-        if (!PyUnicode_Check(item)) {
-            free(arr);
-            PyErr_SetString(PyExc_TypeError, "list elements must be strings");
-            return NULL;
-        }
-        arr[i] = PyUnicode_AsUTF8(item);
-        if (!arr[i]) { free(arr); return NULL; }
-    }
+    for (Py_ssize_t i = 0; i < n; i++)
+        arr[i] = PyUnicode_AsUTF8(PyList_GET_ITEM(list, i));
     arr[n] = NULL;
     *out_count = (int)n;
     return arr;
@@ -82,20 +68,18 @@ static PyObject *py_detect_bgra8(PyObject *self, PyObject *args) {
     if (!PyArg_ParseTuple(args, "y*iiOpOO",
             &bgra8_buf, &width, &height,
             &roi_tuple, &high_accuracy,
-            &langs_list, &custom_words_list)) {
+            &langs_list, &custom_words_list))
         return NULL;
-    }
 
-    double roi_x, roi_y, roi_w, roi_h;
-    if (!PyArg_ParseTuple(roi_tuple, "dddd", &roi_x, &roi_y, &roi_w, &roi_h)) {
-        PyBuffer_Release(&bgra8_buf);
-        return NULL;
-    }
+    double roi_x = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 0));
+    double roi_y = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 1));
+    double roi_w = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 2));
+    double roi_h = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 3));
 
     int lang_count = 0, word_count = 0;
-    const char **langs = parse_str_list(langs_list, &lang_count);
+    const char **langs = unpack_str_list(langs_list, &lang_count);
     if (!langs) { PyBuffer_Release(&bgra8_buf); return NULL; }
-    const char **words = parse_str_list(custom_words_list, &word_count);
+    const char **words = unpack_str_list(custom_words_list, &word_count);
     if (!words) { free(langs); PyBuffer_Release(&bgra8_buf); return NULL; }
 
     OcrResultList result = ocr_detect_bgra8(
@@ -121,35 +105,36 @@ static PyObject *py_detect_image(PyObject *self, PyObject *args) {
     if (!PyArg_ParseTuple(args, "y*OpOO",
             &data_buf,
             &roi_tuple, &high_accuracy,
-            &langs_list, &custom_words_list)) {
+            &langs_list, &custom_words_list))
         return NULL;
-    }
 
-    double roi_x, roi_y, roi_w, roi_h;
-    if (!PyArg_ParseTuple(roi_tuple, "dddd", &roi_x, &roi_y, &roi_w, &roi_h)) {
-        PyBuffer_Release(&data_buf);
-        return NULL;
-    }
+    double roi_x = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 0));
+    double roi_y = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 1));
+    double roi_w = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 2));
+    double roi_h = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 3));
 
     int lang_count = 0, word_count = 0;
-    const char **langs = parse_str_list(langs_list, &lang_count);
+    const char **langs = unpack_str_list(langs_list, &lang_count);
     if (!langs) { PyBuffer_Release(&data_buf); return NULL; }
-    const char **words = parse_str_list(custom_words_list, &word_count);
+    const char **words = unpack_str_list(custom_words_list, &word_count);
     if (!words) { free(langs); PyBuffer_Release(&data_buf); return NULL; }
 
+    int img_width = 0, img_height = 0;
     OcrResultList result = ocr_detect_image(
         (const uint8_t *)data_buf.buf, (size_t)data_buf.len,
         roi_x, roi_y, roi_w, roi_h,
-        high_accuracy, langs, lang_count, words, word_count
+        high_accuracy, langs, lang_count, words, word_count,
+        &img_width, &img_height
     );
 
     PyBuffer_Release(&data_buf);
     free(langs);
     free(words);
 
-    PyObject *py_result = results_to_pylist(result);
+    PyObject *py_list = results_to_pylist(result);
     ocr_result_free(result);
-    return py_result;
+    if (!py_list) return NULL;
+    return Py_BuildValue("(Nii)", py_list, img_width, img_height);
 }
 
 /* ---- Module definition --------------------------------------- */

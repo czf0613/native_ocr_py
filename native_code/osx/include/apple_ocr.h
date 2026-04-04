@@ -60,6 +60,10 @@ OcrResultList ocr_detect_bgra8(
  * Run OCR on an encoded image file loaded into memory (JPEG, PNG, HEIC, …).
  * roi_* and accuracy / language semantics are identical to ocr_detect_bgra8.
  */
+/*
+ * out_width and out_height are set to the decoded image dimensions in pixels.
+ * Both are set to 0 on failure.
+ */
 OcrResultList ocr_detect_image(
     const uint8_t *data,
     size_t         data_len,
@@ -71,5 +75,7 @@ OcrResultList ocr_detect_image(
     const char   **langs,
     int            lang_count,
     const char   **custom_words,
-    int            word_count
+    int            word_count,
+    int           *out_width,
+    int           *out_height
 );
