@@ -14,10 +14,14 @@ if sys.platform == "darwin":
             ],
             extra_compile_args=["-fobjc-arc"],
             extra_link_args=[
-                "-framework", "Vision",
-                "-framework", "Foundation",
-                "-framework", "CoreGraphics",
-                "-framework", "ImageIO",
+                "-framework",
+                "Vision",
+                "-framework",
+                "Foundation",
+                "-framework",
+                "CoreGraphics",
+                "-framework",
+                "ImageIO",
             ],
         )
     )
