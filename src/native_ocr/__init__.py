@@ -1,5 +1,5 @@
 import asyncio
-from functools import cache, partial
+from functools import cache
 
 from .ext import detect_bgra8 as _detect_bgra8
 from .ext import detect_image as _detect_image
@@ -38,7 +38,6 @@ def _parse_roi(roi: BoundingBox | None) -> tuple[float, float, float, float]:
     if roi is None:
         return (0.0, 0.0, 1.0, 1.0)
     return (roi.x, roi.y, roi.width, roi.height)
-
 
 
 def _build_results(
@@ -116,12 +115,8 @@ async def perform_ocr_on_bgra(
     langs = languages or []
     words = custom_words or []
 
-    loop = asyncio.get_running_loop()
-    raw: list[tuple[str, float, float, float, float]] = await loop.run_in_executor(
-        None,
-        partial(
-            _detect_bgra8, bgra, width, height, roi_tuple, high_accuracy, langs, words
-        ),
+    raw: list[tuple[str, float, float, float, float]] = await asyncio.to_thread(
+        _detect_bgra8, bgra, width, height, roi_tuple, high_accuracy, langs, words
     )
 
     return _build_results(raw, normalized, width, height)
@@ -168,10 +163,8 @@ async def perform_ocr_on_image(
     langs = languages or []
     words = custom_words or []
 
-    loop = asyncio.get_running_loop()
-    raw, img_width, img_height = await loop.run_in_executor(
-        None,
-        partial(_detect_image, data, roi_tuple, high_accuracy, langs, words),
+    raw, img_width, img_height = await asyncio.to_thread(
+        _detect_image, data, roi_tuple, high_accuracy, langs, words
     )
 
     return _build_results(raw, normalized, img_width, img_height)
