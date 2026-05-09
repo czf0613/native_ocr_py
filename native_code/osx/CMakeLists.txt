@@ -16,15 +16,14 @@ set(Python3_INCLUDE_DIRS
 )
 set(Python3_LIBRARIES "")
 
-# macOS SDK frameworks
-find_library(VISION_FRAMEWORK    Vision    REQUIRED)
-find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+find_library(VISION_FRAMEWORK     Vision       REQUIRED)
+find_library(FOUNDATION_FRAMEWORK Foundation   REQUIRED)
 find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
-find_library(IMAGEIO_FRAMEWORK     ImageIO      REQUIRED)
+find_library(IMAGEIO_FRAMEWORK    ImageIO      REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
+    src/ext.c
     src/apple_ocr.m
-    src/ocr_native.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -42,4 +41,3 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${COREGRAPHICS_FRAMEWORK}
     ${IMAGEIO_FRAMEWORK}
 )
-# Python3_LIBRARIES is intentionally empty — IDE indexing only, not a real build

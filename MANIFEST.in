@@ -1,6 +1,16 @@
-# Exclude tests and local development files from the source distribution.
-# The wheel never includes these regardless (only packages under src/ are bundled).
-prune tests
+include LICENSE
+include README.md
+include pyproject.toml
+include setup.py
 
-recursive-include native_code/osx/include *
-recursive-include native_code/osx/src *
+recursive-include native_code *.c *.m *.h
+
+exclude CLAUDE.md
+exclude .gitignore
+prune .venv
+prune .github
+prune .claude
+prune .vscode
+prune tests
+prune build
+prune dist

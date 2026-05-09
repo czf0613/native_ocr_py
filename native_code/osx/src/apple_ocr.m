@@ -6,8 +6,6 @@
 #include <string.h>
 #include "apple_ocr.h"
 
-/* ---- Memory management ---------------------------------------- */
-
 void ocr_result_free(OcrResultList result) {
     for (int i = 0; i < result.count; i++) {
         free(result.items[i].text);
@@ -16,51 +14,41 @@ void ocr_result_free(OcrResultList result) {
 }
 
 void ocr_langs_free(char **langs) {
-    if (!langs) return;
+    if (!langs) {
+        return;
+    }
     for (int i = 0; langs[i]; i++) {
         free(langs[i]);
     }
     free(langs);
 }
 
-/* ---- Internal helpers ----------------------------------------- */
-
-/*
- * Convert a Vision results array to OcrResultList.
- * Vision uses bottom-left-origin normalised coordinates; we convert to
- * top-left-origin before storing.
- */
 static OcrResultList extract_results(NSArray<VNRecognizedTextObservation *> *observations) {
     OcrResultList result = {NULL, 0};
-    if (!observations || observations.count == 0) return result;
+    if (!observations || observations.count == 0) {
+        return result;
+    }
 
     result.items = (OcrItem *)malloc(observations.count * sizeof(OcrItem));
-    if (!result.items) return result;
 
     for (VNRecognizedTextObservation *obs in observations) {
         VNRecognizedText *candidate = [[obs topCandidates:1] firstObject];
-        if (!candidate || candidate.string.length == 0) continue;
+        if (!candidate || candidate.string.length == 0) {
+            continue;
+        }
 
-        result.items[result.count].text = strdup(candidate.string.UTF8String);
-
-        /* Convert from Vision's bottom-left origin to top-left origin */
         CGRect bbox = obs.boundingBox;
+        result.items[result.count].text   = strdup(candidate.string.UTF8String);
         result.items[result.count].x      = bbox.origin.x;
         result.items[result.count].y      = 1.0 - (bbox.origin.y + bbox.size.height);
         result.items[result.count].width  = bbox.size.width;
         result.items[result.count].height = bbox.size.height;
-
         result.count++;
     }
 
     return result;
 }
 
-/*
- * Configure a VNRecognizeTextRequest, run it through the given handler,
- * and return the extracted results.
- * roi_* are top-left-origin; converted to Vision's bottom-left-origin internally.
- */
 static OcrResultList run_request(
     VNImageRequestHandler *handler,
     double roi_x, double roi_y, double roi_w, double roi_h,
@@ -76,7 +64,6 @@ static OcrResultList run_request(
         ? VNRequestTextRecognitionLevelAccurate
         : VNRequestTextRecognitionLevelFast;
 
-    /* Vision ROI is bottom-left-origin */
     request.regionOfInterest = CGRectMake(roi_x, 1.0 - roi_y - roi_h, roi_w, roi_h);
 
     if (lang_count > 0) {
@@ -87,7 +74,6 @@ static OcrResultList run_request(
         request.recognitionLanguages = langArray;
     }
 
-    /* custom_words only takes effect in accurate mode */
     if (word_count > 0 && high_accuracy) {
         NSMutableArray<NSString *> *wordArray = [NSMutableArray arrayWithCapacity:word_count];
         for (int i = 0; i < word_count; i++) {
@@ -103,8 +89,6 @@ static OcrResultList run_request(
 
     return extract_results(request.results);
 }
-
-/* ---- Public API ----------------------------------------------- */
 
 char **ocr_get_supported_langs(void) {
     VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] init];
@@ -151,7 +135,9 @@ OcrResultList ocr_detect_bgra8(
     CGColorSpaceRelease(colorSpace);
     CGDataProviderRelease(provider);
 
-    if (!cgImage) return empty;
+    if (!cgImage) {
+        return empty;
+    }
 
     VNImageRequestHandler *handler = [[VNImageRequestHandler alloc]
         initWithCGImage:cgImage options:@{}];
@@ -175,11 +161,15 @@ OcrResultList ocr_detect_image(
 
     NSData *nsData = [NSData dataWithBytesNoCopy:(void *)data length:data_len freeWhenDone:NO];
     CGImageSourceRef imageSource = CGImageSourceCreateWithData((__bridge CFDataRef)nsData, NULL);
-    if (!imageSource) return empty;
+    if (!imageSource) {
+        return empty;
+    }
 
     CGImageRef cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
     CFRelease(imageSource);
-    if (!cgImage) return empty;
+    if (!cgImage) {
+        return empty;
+    }
 
     *out_width  = (int)CGImageGetWidth(cgImage);
     *out_height = (int)CGImageGetHeight(cgImage);
