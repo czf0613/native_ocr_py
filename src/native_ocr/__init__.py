@@ -1,9 +1,10 @@
 import asyncio
 from functools import cache
-
-from ._ocr_native import detect_bgra8 as _detect_bgra8
-from ._ocr_native import detect_image as _detect_image
-from ._ocr_native import get_supported_langs
+from ._ocr_native import (
+    detect_bgra8 as _detect_bgra8,
+    detect_image as _detect_image,
+    get_supported_langs,
+)
 from .types import BoundingBox, OcrResult
 
 __all__ = [
@@ -46,10 +47,12 @@ def _build_results(
             y *= img_height
             w *= img_width
             h *= img_height
-        results.append(OcrResult(
-            content=text,
-            position=BoundingBox(x=x, y=y, width=w, height=h),
-        ))
+        results.append(
+            OcrResult(
+                content=text,
+                position=BoundingBox(x=x, y=y, width=w, height=h),
+            )
+        )
     return results
 
 

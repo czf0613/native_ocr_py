@@ -68,6 +68,10 @@ You should always try to build via `setup.py`
 
 Write docstrings and type annotations in the `.pyi` stub files, not in C code. Every public function exposed by the C extension must have a corresponding annotated entry in the `.pyi` file so that users and IDEs can understand the API.
 
+## Python Code Style
+
+- **Consolidate imports from the same module into one statement.** Do not split them across multiple `from X import ...` lines.
+
 ## C Code Style
 
 - **No docstrings in C method tables.** Pass `NULL` for the `ml_doc` field in `PyMethodDef`. All documentation belongs in the `.pyi` stub files.
