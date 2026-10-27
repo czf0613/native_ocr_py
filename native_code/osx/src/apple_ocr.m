@@ -4,220 +4,434 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
-#include <stdlib.h>
+#include <math.h>
+#include <string.h>
 
-static const char **unpack_str_list(PyObject *list, int *out_count)
+static void set_native_error(const char *operation, NSError *error)
 {
-    Py_ssize_t n = PyList_GET_SIZE(list);
-    const char **arr = (const char **)malloc((n + 1) * sizeof(char *));
-    for (Py_ssize_t i = 0; i < n; i++)
-    {
-        arr[i] = PyUnicode_AsUTF8(PyList_GET_ITEM(list, i));
-    }
-    arr[n] = NULL;
-    *out_count = (int)n;
-    return arr;
+    PyErr_Format(PyExc_RuntimeError, "%s failed (%s, code %ld)", operation,
+                 error.domain.UTF8String ?: "no error details", (long)error.code);
 }
 
-static PyObject *extract_results(NSArray<VNRecognizedTextObservation *> *observations)
+static void set_objc_error(NSException *exception)
+{
+    PyErr_Format(PyExc_RuntimeError, "Vision bridge raised %s",
+                 exception.name.UTF8String ?: "an Objective-C exception");
+}
+
+static int parse_roi(PyObject *roi, double values[4])
+{
+    if (!PyTuple_Check(roi) || PyTuple_GET_SIZE(roi) != 4)
+    {
+        PyErr_SetString(PyExc_TypeError, "roi must be a tuple of four numbers");
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < 4; i++)
+    {
+        values[i] = PyFloat_AsDouble(PyTuple_GET_ITEM(roi, i));
+        if (PyErr_Occurred())
+        {
+            return 0;
+        }
+        if (!isfinite(values[i]))
+        {
+            PyErr_SetString(PyExc_ValueError, "roi values must be finite");
+            return 0;
+        }
+    }
+    if (values[0] < 0 || values[1] < 0 || values[2] <= 0 || values[3] <= 0 ||
+        values[0] + values[2] > 1 || values[1] + values[3] > 1)
+    {
+        PyErr_SetString(PyExc_ValueError, "roi must have positive size and lie within [0, 1]");
+        return 0;
+    }
+    return 1;
+}
+
+static NSArray<NSString *> *unpack_str_list(PyObject *list, const char *name)
+{
+    if (!PyList_Check(list))
+    {
+        PyErr_Format(PyExc_TypeError, "%s must be a list of strings", name);
+        return nil;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(list);
+    NSMutableArray<NSString *> *array = [NSMutableArray arrayWithCapacity:(NSUInteger)count];
+    if (!array)
+    {
+        PyErr_NoMemory();
+        return nil;
+    }
+    for (Py_ssize_t i = 0; i < count; i++)
+    {
+        PyObject *item = PyList_GET_ITEM(list, i);
+        if (!PyUnicode_Check(item))
+        {
+            PyErr_Format(PyExc_TypeError, "%s entries must be strings", name);
+            return nil;
+        }
+        Py_ssize_t length;
+        const char *utf8 = PyUnicode_AsUTF8AndSize(item, &length);
+        if (!utf8)
+        {
+            return nil;
+        }
+        if (memchr(utf8, '\0', (size_t)length))
+        {
+            PyErr_Format(PyExc_ValueError, "%s entries must not contain NUL", name);
+            return nil;
+        }
+        NSString *string = [[NSString alloc] initWithBytes:utf8
+                                                   length:(NSUInteger)length
+                                                 encoding:NSUTF8StringEncoding];
+        if (!string)
+        {
+            PyErr_NoMemory();
+            return nil;
+        }
+        [array addObject:string];
+    }
+    // Foundation strings own their data before any GIL release or list mutation.
+    return array;
+}
+
+static PyObject *python_string(NSString *string)
+{
+    const char *utf8 = string.UTF8String;
+    NSUInteger length = [string lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (!utf8)
+    {
+        PyErr_SetString(PyExc_RuntimeError, "Vision returned invalid text");
+        return NULL;
+    }
+    if (length > PY_SSIZE_T_MAX)
+    {
+        PyErr_SetString(PyExc_OverflowError, "Vision text is too large");
+        return NULL;
+    }
+    return PyUnicode_DecodeUTF8(utf8, (Py_ssize_t)length, "strict");
+}
+
+static PyObject *extract_results(NSArray<VNRecognizedTextObservation *> *observations,
+                                 const double roi[4])
 {
     PyObject *list = PyList_New(0);
-    if (!observations)
+    if (!list)
     {
-        return list;
+        return NULL;
     }
-
-    for (VNRecognizedTextObservation *obs in observations)
+    @try
     {
-        VNRecognizedText *candidate = [[obs topCandidates:1] firstObject];
-        if (!candidate || candidate.string.length == 0)
+        for (VNRecognizedTextObservation *obs in observations)
         {
-            continue;
+            VNRecognizedText *candidate = [[obs topCandidates:1] firstObject];
+            if (!candidate || candidate.string.length == 0)
+            {
+                continue;
+            }
+            CGRect bbox = obs.boundingBox;
+            PyObject *text = python_string(candidate.string);
+            if (!text)
+            {
+                Py_DECREF(list);
+                return NULL;
+            }
+            // Vision reports coordinates in the processed ROI. Public results
+            // use the entire source image, in top-left-origin coordinates.
+            PyObject *tuple = Py_BuildValue("(Odddd)", text,
+                                            roi[0] + bbox.origin.x * roi[2],
+                                            roi[1] + (1.0 - (bbox.origin.y + bbox.size.height)) * roi[3],
+                                            bbox.size.width * roi[2], bbox.size.height * roi[3]);
+            Py_DECREF(text);
+            if (!tuple)
+            {
+                Py_DECREF(list);
+                return NULL;
+            }
+            int status = PyList_Append(list, tuple);
+            Py_DECREF(tuple);
+            if (status < 0)
+            {
+                Py_DECREF(list);
+                return NULL;
+            }
         }
-
-        CGRect bbox = obs.boundingBox;
-        PyObject *tup = Py_BuildValue("(sdddd)",
-                                      candidate.string.UTF8String,
-                                      bbox.origin.x,
-                                      1.0 - (bbox.origin.y + bbox.size.height),
-                                      bbox.size.width,
-                                      bbox.size.height);
-        PyList_Append(list, tup);
-        Py_DECREF(tup);
+    }
+    @catch (NSException *exception)
+    {
+        Py_DECREF(list);
+        @throw;
     }
     return list;
 }
 
-static PyObject *run_request(
-    VNImageRequestHandler *handler,
-    double roi_x, double roi_y, double roi_w, double roi_h,
-    int high_accuracy,
-    const char **langs, int lang_count,
-    const char **custom_words, int word_count)
+static PyObject *run_request(VNImageRequestHandler *handler, const double roi[4],
+                             int high_accuracy, NSArray<NSString *> *langs,
+                             NSArray<NSString *> *words)
 {
     VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] init];
-
-    request.recognitionLevel = high_accuracy
-                                   ? VNRequestTextRecognitionLevelAccurate
-                                   : VNRequestTextRecognitionLevelFast;
-
-    request.regionOfInterest = CGRectMake(roi_x, 1.0 - roi_y - roi_h, roi_w, roi_h);
-
-    if (lang_count > 0)
+    if (!handler || !request)
     {
-        NSMutableArray<NSString *> *langArray = [NSMutableArray arrayWithCapacity:lang_count];
-        for (int i = 0; i < lang_count; i++)
-        {
-            [langArray addObject:[NSString stringWithUTF8String:langs[i]]];
-        }
-        request.recognitionLanguages = langArray;
+        return PyErr_NoMemory();
     }
-
-    if (word_count > 0 && high_accuracy)
+    request.recognitionLevel = high_accuracy ? VNRequestTextRecognitionLevelAccurate
+                                            : VNRequestTextRecognitionLevelFast;
+    // Sum first: (1 - y) - height can be negative for a valid bottom-edge ROI.
+    request.regionOfInterest = CGRectMake(roi[0], 1.0 - (roi[1] + roi[3]), roi[2], roi[3]);
+    if (langs.count > 0)
     {
-        NSMutableArray<NSString *> *wordArray = [NSMutableArray arrayWithCapacity:word_count];
-        for (int i = 0; i < word_count; i++)
-        {
-            [wordArray addObject:[NSString stringWithUTF8String:custom_words[i]]];
-        }
-        request.customWords = wordArray;
+        request.recognitionLanguages = langs;
     }
-
+    if (words.count > 0 && high_accuracy)
+    {
+        request.customWords = words;
+    }
+    NSArray<VNRequest *> *requests = @[request];
     NSError *error = nil;
-    if (![handler performRequests:@[request] error:&error])
+    BOOL success = NO;
+    // Only Vision runs without the GIL. All inputs are owned native snapshots.
+    // @finally restores the GIL even if Vision raises an Objective-C exception.
+    PyThreadState *thread_state = PyEval_SaveThread();
+    @try
     {
-        return PyList_New(0);
+        success = [handler performRequests:requests error:&error];
     }
-
-    return extract_results(request.results);
+    @finally
+    {
+        PyEval_RestoreThread(thread_state);
+    }
+    if (!success || error)
+    {
+        set_native_error("Vision text recognition", error);
+        return NULL;
+    }
+    return extract_results(request.results, roi);
 }
 
 PyObject *py_get_supported_langs(PyObject *self, PyObject *args)
 {
-    VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] init];
-    req.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
-    NSError *error = nil;
-    NSArray<NSString *> *langs = [req supportedRecognitionLanguagesAndReturnError:&error];
-
-    if (error || !langs)
+    @autoreleasepool
     {
-        return PyList_New(0);
+        PyObject *list = NULL;
+        @try
+        {
+            VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] init];
+            if (!request)
+            {
+                return PyErr_NoMemory();
+            }
+            request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+            NSError *error = nil;
+            NSArray<NSString *> *langs = [request supportedRecognitionLanguagesAndReturnError:&error];
+            if (error || !langs)
+            {
+                set_native_error("Vision language query", error);
+                return NULL;
+            }
+            list = PyList_New(0);
+            if (!list)
+            {
+                return NULL;
+            }
+            for (NSString *lang in langs)
+            {
+                PyObject *text = python_string(lang);
+                if (!text)
+                {
+                    Py_DECREF(list);
+                    return NULL;
+                }
+                int status = PyList_Append(list, text);
+                Py_DECREF(text);
+                if (status < 0)
+                {
+                    Py_DECREF(list);
+                    return NULL;
+                }
+            }
+        }
+        @catch (NSException *exception)
+        {
+            Py_XDECREF(list);
+            set_objc_error(exception);
+            return NULL;
+        }
+        return list;
+    }
+}
+
+static PyObject *detect_buffer(Py_buffer *buffer, int width, int height, PyObject *roi_object,
+                               int high_accuracy, PyObject *langs_object,
+                               PyObject *words_object, int is_bgra)
+{
+    double roi[4];
+    if (!parse_roi(roi_object, roi))
+    {
+        return NULL;
+    }
+    NSArray<NSString *> *langs = unpack_str_list(langs_object, "languages");
+    if (!langs)
+    {
+        return NULL;
+    }
+    NSArray<NSString *> *words = unpack_str_list(words_object, "custom_words");
+    if (!words)
+    {
+        return NULL;
+    }
+    size_t row_bytes = 0;
+    if (is_bgra)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            PyErr_SetString(PyExc_ValueError, "BGRA width and height must be positive");
+            return NULL;
+        }
+        if ((size_t)width > (size_t)PY_SSIZE_T_MAX / 4)
+        {
+            PyErr_SetString(PyExc_OverflowError, "BGRA row size is not representable");
+            return NULL;
+        }
+        row_bytes = (size_t)width * 4;
+        if ((size_t)height > (size_t)PY_SSIZE_T_MAX / row_bytes)
+        {
+            PyErr_SetString(PyExc_OverflowError, "BGRA buffer size is not representable");
+            return NULL;
+        }
+        if ((size_t)buffer->len != row_bytes * (size_t)height)
+        {
+            PyErr_SetString(PyExc_ValueError, "BGRA buffer length must equal width * height * 4");
+            return NULL;
+        }
     }
 
-    PyObject *list = PyList_New(langs.count);
-    for (NSUInteger i = 0; i < langs.count; i++)
+    // Always copy, including readonly views of mutable exporters. A buffer export
+    // prevents resizing, but does not prevent another thread from writing to it.
+    NSData *snapshot = [[NSData alloc] initWithBytes:buffer->buf length:(NSUInteger)buffer->len];
+    if (!snapshot)
     {
-        PyList_SET_ITEM(list, i, PyUnicode_FromString(langs[i].UTF8String));
+        return PyErr_NoMemory();
     }
-    return list;
+    CGColorSpaceRef color_space = NULL;
+    CGDataProviderRef provider = NULL;
+    CGImageSourceRef source = NULL;
+    CGImageRef image = NULL;
+    @try
+    {
+        if (is_bgra)
+        {
+            color_space = CGColorSpaceCreateDeviceRGB();
+            if (!color_space)
+            {
+                return PyErr_NoMemory();
+            }
+            provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)snapshot);
+            if (!provider)
+            {
+                return PyErr_NoMemory();
+            }
+            image = CGImageCreate((size_t)width, (size_t)height, 8, 32, row_bytes,
+                                  color_space,
+                                  kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst,
+                                  provider, NULL, false, kCGRenderingIntentDefault);
+            if (!image)
+            {
+                PyErr_SetString(PyExc_RuntimeError, "CoreGraphics could not create the BGRA image");
+                return NULL;
+            }
+        }
+        else
+        {
+            source = CGImageSourceCreateWithData((__bridge CFDataRef)snapshot, NULL);
+            if (source)
+            {
+                image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+            }
+            if (!image)
+            {
+                PyErr_SetString(PyExc_ValueError, "ImageIO could not decode the image data");
+                return NULL;
+            }
+        }
+        size_t image_width = CGImageGetWidth(image);
+        size_t image_height = CGImageGetHeight(image);
+        if (image_width > PY_SSIZE_T_MAX || image_height > PY_SSIZE_T_MAX)
+        {
+            PyErr_SetString(PyExc_OverflowError, "decoded image dimensions are not representable");
+            return NULL;
+        }
+        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:image options:@{}];
+        PyObject *results = run_request(handler, roi, high_accuracy, langs, words);
+        if (!results || is_bgra)
+        {
+            return results;
+        }
+        return Py_BuildValue("(Nnn)", results, (Py_ssize_t)image_width, (Py_ssize_t)image_height);
+    }
+    @finally
+    {
+        if (image)
+        {
+            CGImageRelease(image);
+        }
+        if (source)
+        {
+            CFRelease(source);
+        }
+        if (provider)
+        {
+            CGDataProviderRelease(provider);
+        }
+        if (color_space)
+        {
+            CGColorSpaceRelease(color_space);
+        }
+    }
+}
+
+static PyObject *detect(PyObject *args, int is_bgra)
+{
+    Py_buffer buffer = {0};
+    int width = 0, height = 0, high_accuracy;
+    PyObject *roi, *langs, *words;
+    if (is_bgra)
+    {
+        if (!PyArg_ParseTuple(args, "y*iiOpOO:detect_bgra8", &buffer, &width, &height,
+                              &roi, &high_accuracy, &langs, &words))
+        {
+            return NULL;
+        }
+    }
+    else if (!PyArg_ParseTuple(args, "y*OpOO:detect_image", &buffer, &roi,
+                               &high_accuracy, &langs, &words))
+    {
+        return NULL;
+    }
+    PyObject *result = NULL;
+    @autoreleasepool
+    {
+        @try
+        {
+            result = detect_buffer(&buffer, width, height, roi, high_accuracy, langs, words, is_bgra);
+        }
+        @catch (NSException *exception)
+        {
+            set_objc_error(exception);
+        }
+        @finally
+        {
+            PyBuffer_Release(&buffer);
+        }
+    }
+    return result;
 }
 
 PyObject *py_detect_bgra8(PyObject *self, PyObject *args)
 {
-    Py_buffer bgra8_buf;
-    int width, height, high_accuracy;
-    PyObject *roi_tuple, *langs_list, *custom_words_list;
-    PyArg_ParseTuple(args, "y*iiOpOO",
-                     &bgra8_buf, &width, &height,
-                     &roi_tuple, &high_accuracy,
-                     &langs_list, &custom_words_list);
-
-    double roi_x = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 0));
-    double roi_y = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 1));
-    double roi_w = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 2));
-    double roi_h = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 3));
-
-    int lang_count = 0, word_count = 0;
-    const char **langs = unpack_str_list(langs_list, &lang_count);
-    const char **words = unpack_str_list(custom_words_list, &word_count);
-
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    CGDataProviderRef provider = CGDataProviderCreateWithData(
-        NULL, bgra8_buf.buf, (size_t)(width * height * 4), NULL);
-    CGImageRef cgImage = CGImageCreate(
-        (size_t)width, (size_t)height,
-        8, 32, (size_t)(width * 4),
-        colorSpace,
-        kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst,
-        provider,
-        NULL, false, kCGRenderingIntentDefault);
-    CGColorSpaceRelease(colorSpace);
-    CGDataProviderRelease(provider);
-
-    PyObject *py_result;
-    if (!cgImage)
-    {
-        py_result = PyList_New(0);
-    }
-    else
-    {
-        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc]
-            initWithCGImage:cgImage
-                    options:@{}];
-        CGImageRelease(cgImage);
-        py_result = run_request(handler, roi_x, roi_y, roi_w, roi_h,
-                                high_accuracy, langs, lang_count, words, word_count);
-    }
-
-    PyBuffer_Release(&bgra8_buf);
-    free(langs);
-    free(words);
-    return py_result;
+    return detect(args, 1);
 }
 
 PyObject *py_detect_image(PyObject *self, PyObject *args)
 {
-    Py_buffer data_buf;
-    int high_accuracy;
-    PyObject *roi_tuple, *langs_list, *custom_words_list;
-    PyArg_ParseTuple(args, "y*OpOO",
-                     &data_buf,
-                     &roi_tuple, &high_accuracy,
-                     &langs_list, &custom_words_list);
-
-    double roi_x = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 0));
-    double roi_y = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 1));
-    double roi_w = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 2));
-    double roi_h = PyFloat_AsDouble(PyTuple_GET_ITEM(roi_tuple, 3));
-
-    int lang_count = 0, word_count = 0;
-    const char **langs = unpack_str_list(langs_list, &lang_count);
-    const char **words = unpack_str_list(custom_words_list, &word_count);
-
-    int img_width = 0, img_height = 0;
-    PyObject *py_list;
-
-    NSData *nsData = [NSData dataWithBytesNoCopy:(void *)data_buf.buf
-                                          length:data_buf.len
-                                    freeWhenDone:NO];
-    CGImageSourceRef imageSource = CGImageSourceCreateWithData((__bridge CFDataRef)nsData, NULL);
-    if (!imageSource)
-    {
-        py_list = PyList_New(0);
-    }
-    else
-    {
-        CGImageRef cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, NULL);
-        CFRelease(imageSource);
-        if (!cgImage)
-        {
-            py_list = PyList_New(0);
-        }
-        else
-        {
-            img_width = (int)CGImageGetWidth(cgImage);
-            img_height = (int)CGImageGetHeight(cgImage);
-            VNImageRequestHandler *handler = [[VNImageRequestHandler alloc]
-                initWithCGImage:cgImage
-                        options:@{}];
-            CGImageRelease(cgImage);
-            py_list = run_request(handler, roi_x, roi_y, roi_w, roi_h,
-                                  high_accuracy, langs, lang_count, words, word_count);
-        }
-    }
-
-    PyBuffer_Release(&data_buf);
-    free(langs);
-    free(words);
-    return Py_BuildValue("(Nii)", py_list, img_width, img_height);
+    return detect(args, 0);
 }
