@@ -1,78 +1,75 @@
 # 开发与验证
 
-从当前 Provider 会话 worktree 根目录执行命令，先遵循 [AGENTS.md](../AGENTS.md)。使用 uv、setuptools 和已安装的 macOS SDK；不升级依赖、不改 Python pin/lock，也不改全局代理或系统权限。CMake 只作索引。
+统一约束见 [AGENTS.md](../AGENTS.md)，当前实测状态见[验证记录](validation-20261027.md)。使用 uv、setuptools 和已安装的 macOS SDK；不通过 CMake 构建，不擅自更改依赖、Python pin 或全局配置。
 
-**本轮记录：**文档初稿仅做语法与源码一致性检查；以下构建、导入、pytest、真实 OCR、打包与安装命令均未在本轮执行，不代表验收通过。
+## 从 checkout 到示例
 
-## 构建与导入门禁
+新 checkout 可按以下步骤建立工作分支；先将 `selected_sha` 替换为当前任务选定的完整提交。已有 checkout 应保留当前工作并按任务要求集成，不重新初始化。
+
+```bash
+git clone --no-checkout https://github.com/czf0613/native_ocr_py.git
+cd native_ocr_py
+selected_sha="替换为已选定的完整提交SHA"
+git switch --create my-ocr-work "$selected_sha"
+```
+
+从仓库根目录执行：
 
 ```bash
 uv sync --locked
 uv run --no-sync python setup.py build_ext --inplace
 uv run --no-sync python -c 'import native_ocr; import native_ocr._ocr_native as ext; print(native_ocr.__file__); print(ext.__file__)'
+uv run --no-sync python examples/ocr_image.py --help
+uv run --no-sync python examples/ocr_image.py tests/sample.png --language zh-Hans
+uv run --no-sync python examples/ocr_image.py tests/sample.png --language zh-Hans --pixels
 ```
 
-确认两个路径都属于当前 worktree；导入失败就停止原生验收，不能用跳过测试代替。分发名 `native_ocr_py` 与导入名 `native_ocr` 不同。运行时没有第三方 Python 依赖；pytest、pytest-asyncio、Pillow 属于开发依赖。
+确认 Python 模块和 `.so` 均来自当前 checkout；导入失败先停止验收。分发名是 `native_ocr_py`、导入名是 `native_ocr`。运行时无第三方 Python 依赖，pytest、pytest-asyncio、Pillow 属于锁定开发环境。
 
-`build.sh` 会清理 `build/`、`dist/`、`src/native_ocr_py.egg-info/`，再执行 `uv sync` 和 `uv build`。它不是保留所有构建产物的命令；本轮不运行该脚本，锁定环境使用上述步骤。
+示例只读取指定文件并打印真实结果；也可使用用户明确提供的图片。`--language` 可重复；不传时使用系统默认配置，不是自动检测。原样例正确标题“恭喜获得”在当前系统误读为“恭喜荻得。”，示例正常退出不代表识别准确。
 
-## 分层验证
+`build.sh` 会清理 `build/`、`dist/`、`src/native_ocr_py.egg-info/`，再执行 `uv sync` 和 `uv build`。需要保留已有构建产物或锁定环境时，使用上面的独立步骤。编译警告和最低平台验证必须单独记录，不自行抬高/降低支持声明。
 
-当前已有原生测试：
+## 分层测试
 
-```bash
-uv run --no-sync pytest tests/test_ocr.py -v -ra
-```
-
-现有文件用模块级 `importorskip` 导入扩展和 Pillow，扩展缺失或 Pillow 缺失可能使整文件跳过；部分断言还可能在空结果上循环而空通过。先完成导入门禁，保存收集/通过/失败/跳过数和原因，真实文字测试必须先断言非空并核对已知内容。
-
-实现修复合入后，核实计划中的测试文件实际存在，再分别执行：
+先完成显式导入门禁，然后按改动选择相关测试；原生实现收尾执行完整回归：
 
 ```bash
-uv run --no-sync pytest tests/test_native_validation.py -v -ra
 uv run --no-sync pytest tests/test_api.py -v -ra
-uv run --no-sync pytest tests/test_ocr.py -v -ra
+uv run --no-sync pytest tests/test_native_validation.py tests/test_native_lifecycle.py -v -ra
+uv run --no-sync pytest tests/test_vision.py tests/test_ocr.py -v -ra
 uv run --no-sync pytest -v -ra
 ```
 
-`test_native_validation.py` 和 `test_api.py` 是计划新增项，固定输入中尚不存在。非法原生输入须先修复 P0 再用子进程隔离、设置超时；信号终止、超时、SystemError 不能当作预期异常。包装层 mock 不证明真实 Vision 行为；内容/坐标和事件循环响应性需真实 fixture，详见[验证矩阵](codex-takeover-plan-20261027.md)。
+| 层 | 验证范围 |
+| --- | --- |
+| `test_api.py` | 包装层位置参数、结果清理/缩放、异常传播和缓存；mock 不构成 Vision 验收。 |
+| `test_native_validation.py` | 子进程隔离非法参数、尺寸、ROI、字符串等；崩溃/超时/SystemError 是失败。 |
+| `test_native_lifecycle.py` | 临时测试 dylib 注入 NSError/NSException、GIL 屏障、可变输入快照及取消生命周期；不应链接进生产扩展。 |
+| `test_vision.py` | 临时绘制已知英文/中文、不透明图，验证编码/BGRA、语言、ROI、坐标与事件循环进展。 |
+| `test_ocr.py` | 仓库 sample 回归，四项精确标题测试仅对已知“恭喜荻得”误读 xfail，保留正确预期。 |
 
-只使用仓库样例、临时生成图片或用户明确提供图片，不截图、不操作桌面。可运行文件输入示例：
+`conftest.py` 强制扩展来自当前 checkout。Pillow 跳过仅限依赖它的测试/fixture，但验收仍需报告实际 skip；本次实现报告为 193 passed、4 xfailed、0 skipped，xfail 不能算 passed。本轮文档整合不重复完整矩阵。
 
-```bash
-uv run --no-sync python examples/ocr_image.py tests/sample.png --language zh-Hans
-uv run --no-sync python examples/ocr_image.py tests/sample.png --pixels
-```
+## 本地 wheel/sdist 验证
 
-示例打印真实结果；不以预写文本代替 OCR，不将 `[]` 自动判为成功。取消等待不能可靠终止已经开始的原生识别。
-
-## 本地打包和安装验证（需要时）
-
-仅本地构建，不上传、不执行仓库发布工作流：
-
-```bash
-uv build --no-sources
-```
-
-分别在临时环境验证本地 wheel 和 sdist。以下每次只选择一个实际生成的文件，手动替换路径，不假定架构或文件名：
+使用已同步环境，离线构建并检查本地产物，不上传：
 
 ```bash
-artifact_path="/absolute/path/to/one-local-artifact.whl"
-verify_root=$(mktemp -d)
-uv venv "$verify_root/venv"
-uv pip install --python "$verify_root/venv/bin/python" "$artifact_path"
-(cd "$verify_root" && uv run --no-project --no-sync --python "$verify_root/venv/bin/python" python -c 'import native_ocr; import native_ocr._ocr_native as ext; print(native_ocr.__file__); print(ext.__file__)')
+uv build --no-build-isolation --offline
+mkdir -p build/documentation-tmp
+TMPDIR="$PWD/build/documentation-tmp" uv run --no-sync python tests/check_distribution.py
 ```
 
-验证 sdist 时用新的临时环境，将 `artifact_path` 换成实际 `.tar.gz`。确认导入来自临时环境而非源码目录，检查 wheel 含 `.pyi`/`py.typed`，sdist 含原生源文件；记录 SDK、系统、CPU、Python 和构建产物信息。构建隔离可能按现有范围获取构建依赖，不修改项目的依赖声明或锁文件。打包/安装成功也不替代真实 OCR 或其它平台验收。
+脚本要求 `dist/` 恰有一个 wheel 和一个 sdist，若有多份先人工确认，不盲目删除；可通过 `uv build --out-dir <目录>` 保留旧产物，但脚本固定读取 `dist/`。脚本检查 wheel 的 `.pyi`/`py.typed`/`.so` 及 sdist 的原生源文件，在临时 venv 中只安装本地 wheel，隔离导入并验证语言查询和损坏图片异常。**它没有另行从 sdist 安装测试**，不能报告为两种产物安装均通过。
 
-## 提交与交付
+若离线构建依赖不可用，记录缺失项；不要升级锁定依赖或将降级方案写成通过。生成的 wheel 标签反映本机工具链配置，不能证明最低系统/其它架构可用，也不等于 PyPI 已发布。
 
-文档首轮可用 Python `ast.parse` 检查示例/代码块、`tomllib` 核对元数据与源码签名，不需导入原生扩展。提交前执行：
+## 交付证据
 
 ```bash
 git diff --check
 git status --short
 ```
 
-逐项核对角色文件范围，提交并普通 push 到获准测试分支；随后单独运行 `git ls-remote origin refs/heads/<获准分支>`，记录远端完整 SHA。文档角色本轮仅交付 `codex/provider-ocr-takeover-20261027`，不创建 PR，不更新默认分支、tag 或 release。
+核对当前任务的文件范围和获准分支，再执行获准的 commit/push；远端核验单独执行 `git ls-remote origin refs/heads/<获准分支>`。记录实际命令、退出码、连续输出及通过/失败/xfail/skip 数量；区分亲测、外部报告和未验证项。一次性接管约束与本轮结果放在[带日期的记录](validation-20261027.md)。

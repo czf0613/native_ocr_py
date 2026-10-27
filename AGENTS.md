@@ -1,28 +1,42 @@
-# Agent 接管入口
+# Agent 维护入口
 
-先读 [README.md](README.md)、[架构说明](docs/architecture.md)、[开发指南](docs/development.md)及[本轮接管计划](docs/codex-takeover-plan-20261027.md)。用户指令优先于旧指南；修复有证据的安全问题，不沿用忽略解析/分配错误的旧建议。
+先读 [README.md](README.md)、[架构说明](docs/architecture.md)和[开发指南](docs/development.md)。带日期的方案与验证文档保留各轮范围和证据，不能替代当前用户授权。
 
-## 工作边界
+## 代码地图
 
-- 只操作本会话的 Provider worktree，保留已有结果及无关改动；不 reset/clean，不访问或修改原始 `/Users/czf/Desktop/utils/native_ocr_py` checkout。
-- 集成调度方指定的精确提交，不以移动分支最新值代替，不修改 Provider 私有 ref。未经明确授权不启动其他 Agent。
-- 本轮只向各角色获准的测试分支普通 push；文档角色唯一输出为 `codex/provider-ocr-takeover-20261027`。不修改/推送 master、main 或默认分支，不 force push、打 tag、建 release 或运行发布工作流，不自行追加最终合并。
-- 文档首轮仅改 README、AGENTS、CLAUDE、architecture/development 文档、文件输入示例，以及 pyproject 的 description/keywords；不改方案、实现、stub、tests、构建或 lock。实现集成必须等待调度方给出精确已发布 SHA。
-- 只用仓库样例、临时生成图片或用户明确提供的图片；不截图、不操作桌面、不修改系统权限。不读取、打印或提交凭据。
-- 不升级依赖、版本或 Python pin，不改全局配置。若确需联网代理，只给单条命令设置环境变量。
+| 路径 | 职责 |
+| --- | --- |
+| `src/native_ocr/__init__.py` | 公共 async API、ROI 字典解析、结果清理/缩放、语言缓存。 |
+| `src/native_ocr/types.py` / `_ocr_native.pyi` | TypedDict 及同步扩展入口的静态接口。 |
+| `native_code/osx/src/ext.c` / `apple_ocr.m` | C 模块注册、输入校验、图像与 Vision、原生资源管理。 |
+| `setup.py` / `pyproject.toml` | setuptools 扩展构建及项目元数据。 |
+| `tests/` / `examples/ocr_image.py` | 分层回归与文件输入示例。 |
 
 ## 构建与验证
 
-- 项目操作使用 `uv`；保持锁定环境，使用 setuptools / `setup.py` 构建扩展，CMake **仅用于 IDE 索引**，不用于构建或安装。
-- 原生验收先显式导入并核对扩展来自当前 worktree，不能把 `importorskip` 当成功。危险非法输入回归应在子进程隔离并设超时。
-- 按改动运行相关检查；涉及实现的收尾执行完整测试，记录通过/失败/跳过数量及原因。文档首轮仅做语法和一致性检查，无需重复原生构建。
-- 提交前执行 `git diff --check`，核对文件范围。提交后普通 push 至唯一获准分支，再单独执行 `git ls-remote origin refs/heads/<branch>` 核验。
-- 报告实际命令、退出码和连续输出证据；未执行项目标记 `not_run`，静态审阅、计划和其它 Agent 的记录不等于运行时验收。
+项目操作使用 uv，保持锁定依赖；未经授权不升级版本、依赖或 Python pin。构建使用 setuptools / `setup.py`；CMake **仅供 IDE 索引**，不用于构建或安装。
 
-## 实现约束
+```bash
+uv sync --locked
+uv run --no-sync python setup.py build_ext --inplace
+uv run --no-sync python -c 'import native_ocr; import native_ocr._ocr_native as ext; print(native_ocr.__file__); print(ext.__file__)'
+uv run --no-sync pytest -v -ra
+git diff --check
+```
 
-- 保持公开函数名称、参数顺序/默认值、位置传参兼容及 TypedDict/嵌套 dict 结果；不以文档修正为由改变 API。
-- C 入口独立检查 `PyArg_ParseTuple`、容器类型/长度、数值转换和溢出。检查每个可失败的 Python 分配、列表操作、malloc 和系统调用，保留异常并完整清理；stub 不提供运行时安全。
-- ARC 不代管 CF 引用或 Python 引用；每个 buffer/CF/Python 引用在成功与失败路径各释放一次。释放 GIL 的区间不得调用 Python C API，且需先保证输入和原生对象生命周期稳定。
-- 无 GIL 工作不代表可强制取消原生请求；不预先宣称错误语义、线程响应性或资源问题已修复。
-- Python 合并同模块导入；C/ObjC 控制流始终加花括号。原生入口注解和说明维护于 `.pyi`，方法表 `ml_doc` 使用 `NULL`。
+先核对导入路径属于当前 checkout，不能将扩展缺失或 skip 当作验收通过。按改动选择相关检查，涉及原生实现时执行完整回归；只有文档变动时可做语法、一致性和示例检查，不必重复已确认代码的完整矩阵。危险原生输入用子进程隔离并设超时；信号终止、超时、SystemError 都不是合法异常结果。
+
+## API 与原生安全
+
+- 保持公共名称、参数顺序/默认值、位置传参兼容和 TypedDict/嵌套 dict 结构；API 行为变化需明确说明并覆盖回归。
+- `.pyi` 不提供运行时校验。原生入口必须检查参数解析、容器类型/长度、数值转换、溢出、Python 分配/列表操作和系统调用失败，保留有效异常并清理资源。
+- ARC 不代管 CF/Python 引用。每个 buffer/CF/Python 引用在成功和失败出口各释放一次；每调用的 autoreleasepool 覆盖工作线程上的原生对象。
+- 释放 GIL 前先持有稳定的输入快照和原生对象；无 GIL 区不调用 Python C API，异常路径也必须恢复 GIL。取消 await 不等于终止原生工作。
+- Python 合并同模块导入，C/ObjC 控制流加花括号；同步入口说明和注解维护于 `.pyi`，C 方法表 `ml_doc` 使用 `NULL`。
+
+## 工作与证据
+
+- 保留无关改动，不覆盖他人工作；遵守当前任务的目录、文件、分支、协作和权限限制。指定了精确依赖 SHA 时不要用移动分支最新值替代。
+- 使用获准样例或临时生成的可追溯 fixture，避免自行读取用户私有图片、采集屏幕或更改系统权限；不读取、打印或提交凭据。代理仅对确需联网的单条命令生效，不改全局配置。
+- 提交、push、默认分支更新、tag/release 和包发布均须符合当前用户授权；完成实现不自动授予额外发布权限。发布分支后用单独的 `git ls-remote origin refs/heads/<branch>` 核验精确远端 SHA。
+- 记录实际命令、退出码、连续输出及通过/失败/xfail/skip 数量。未执行项目标为 `not_run`；注明外部报告来源，不把其它会话或静态审阅冒充本轮亲测。

@@ -1,47 +1,52 @@
-# 架构与当前边界
+# 架构与边界
 
-本说明对应固定输入 `819f41413f22812eb25c64c0efd04cad0d5b3107`；实现修复尚未集成，本轮未执行原生功能验收。
+本说明已对齐实现提交 `dff3766418c20abf6b302c1656c6e55148af9b87`。各会话实测来源、已知误读及未验证项见[验证记录](validation-20261027.md)；[最初计划](codex-takeover-plan-20261027.md)保留为历史快照。
 
-## 调用链
+## 调用链与文件
 
 ```text
-应用（读取图片文件或提供已解码 BGRA）
-  → native_ocr 的 async Python 包装
-  → asyncio.to_thread
-  → _ocr_native 同步 C 入口（ext.c 注册）
-  → apple_ocr.m：CoreGraphics / ImageIO → Vision request
-  → 原生 tuple 列表 → Python 文本清理和坐标缩放 → 嵌套 dict
+应用读取编码图片 / 提供 BGRA
+  → native_ocr async API → asyncio.to_thread
+  → _ocr_native 同步 C 入口（ext.c）
+  → apple_ocr.m：校验、输入快照、ImageIO/CoreGraphics、Vision
+  → tuple 列表 → Python 去空白/过滤空串/坐标缩放 → 嵌套 dict
 ```
 
-| 文件 | 职责 |
-| --- | --- |
-| `src/native_ocr/__init__.py` | 五个公共导出；语言查询缓存、ROI 转 tuple、线程调度、去空白/空串及坐标换算。 |
-| `src/native_ocr/types.py` | `BoundingBox` / `OcrResult` TypedDict；运行时是 dict。 |
-| `src/native_ocr/_ocr_native.pyi` | 三个同步扩展入口的静态接口，不检查运行时输入。部分旧说明与源码不符，以本说明及 README 的源码核对结果为准，待实现角色对齐。 |
-| `native_code/osx/src/ext.c` | 注册 `get_supported_langs`、`detect_image`、`detect_bgra8`。 |
-| `native_code/osx/src/apple_ocr.m` | 参数处理、图像构造/解码、Vision 请求、结果提取和资源释放。 |
-| `setup.py` / `pyproject.toml` | setuptools 扩展构建及项目元数据；链接 Vision、Foundation、CoreGraphics、ImageIO。 |
-| `native_code/osx/CMakeLists.txt` | IDE 索引，不能用于构建。 |
+`src/native_ocr/__init__.py` 导出 `BoundingBox`、`OcrResult`、`get_supported_languages` 和两个 async OCR 函数。`types.py` 定义 TypedDict，运行时为字典；`_ocr_native.pyi` 描述三个同步入口，不承担运行时校验。`setup.py` 通过 setuptools 构建 C/ObjC 扩展，启用 ARC/ARC 异常清理，链接 Vision、Foundation、CoreGraphics、ImageIO。CMake 只供索引。
 
-## 图像、坐标与语言
+## 图像与坐标
 
-编码路径以无拷贝 NSData 包装文件字节，经 ImageIO 解码第 0 帧并取得整图宽高；没有显式传入 EXIF orientation。BGRA 路径使用无拷贝 CGDataProvider 构造 CGImage：紧密排列、无行填充、每像素四字节、预乘 alpha。输入必须严格等长，当前原生代码尚未完整校验长度和尺寸溢出。
+两种输入均先复制到自持有的 NSData。编码路径经 ImageIO 解码第 0 帧，读取整图尺寸，不显式传 EXIF orientation；可用格式由系统决定。BGRA 路径由快照建立 provider/CGImage，要求正尺寸、无行填充、严格等长、预乘 alpha 的 BGRA8；在乘法及长度比较前检查范围。
 
-ROI 输入采用左上原点的归一化 `(x, y, width, height)`，传给 Vision 时 y 转为 `1 - y - height`。提取结果时做同样的 y 轴翻转。Python 对 `normalized=False` 的结果用整图宽高相乘，保留浮点数，不以 ROI 为新的坐标原点。局部 ROI、透明 BGRA 和 EXIF 方向仍需真实 fixture 验证。
+ROI 是左上原点的归一化矩形，默认全图。四项须可转数值且有限、尺寸为正且位于整图内，不自动裁剪。传给 Vision 的 y 为 `1 - (y + height)`，先求和避免底边浮点误差。Vision 结果按 ROI 换算为整图归一化坐标：
 
-每次识别创建新的 handler/request；`high_accuracy` 选择 accurate/fast。只有语言列表非空才设置 `recognitionLanguages`，只有 accurate 模式且词表非空才设置 `customWords`。未启用自动语言检测，未固定 request revision。语言查询采用 accurate 模式，不能据此推定 fast 的能力；Python 缓存返回同一个列表对象。
+```text
+x = roi.x + bbox.x * roi.width
+y = roi.y + (1 - (bbox.y + bbox.height)) * roi.height
+width  = bbox.width  * roi.width
+height = bbox.height * roi.height
+```
 
-## 资源与线程
+`normalized=False` 再由 Python 层用整图宽高相乘，返回值仍是 float。ROI 不建立新的输出原点。当前生成英文/中文图片测试覆盖整图坐标、ROI 包含/排除及像素换算；这是指定环境的测试证据，不是所有图像/系统的保证。
 
-- Python 导出的 `Py_buffer` 借用输入内存，当前调用结束后释放；无拷贝 NSData/provider 不接管这块内存。调用期间必须保证数据存活且内容稳定。
-- ARC 管理 Objective-C 对象；CF 的 create/copy 引用及 Python 引用仍需显式释放。当前正常路径有释放，错误路径和分配检查需按计划补齐；没有每调用的显式 autoreleasepool。
-- `asyncio.to_thread` 仅将同步调用交给工作线程；当前原生调用没有显式释放 GIL，不能保证其它 Python 工作或事件循环持续运行。
-- 取消 await 不等于终止已经启动的 Vision 请求；不能依赖超时/取消释放底层工作占用的资源。
+## 请求、错误与语言
 
-## 当前行为与待集成修复
+每次识别创建 handler/request；`high_accuracy` 选择 accurate/fast，custom words 仅在 accurate 下设置。`languages=None` 被包装为 `[]`，原生仅在列表非空时设置语言；空列表使用系统默认配置，未启用自动语言检测，也未固定 request revision。accurate 的语言能力查询不能保证 fast 能力相同。
 
-正常无文字会得到空列表，Python 还会过滤纯空白候选；但当前解码/图像创建/Vision/语言查询失败也可能得到空列表。语言查询失败的空列表还会被缓存。目前不能给用户承诺统一的异常类型或消息。
+成功无文字仍返回空列表。错误处理区分类型/结构（TypeError）、非法值或解码失败（ValueError）、尺寸溢出（OverflowError）、系统/Vision/ObjC 失败（RuntimeError）及已检查的分配失败（MemoryError）；UTF-8 编码错误保留 UnicodeEncodeError。具体典型原因见 README，不承诺稳定的异常消息。
 
-[接管计划](codex-takeover-plan-20261027.md)提出补齐参数、尺寸、ROI、字符串和分配检查，区分失败与合法空结果，完善清理并在合适区间释放 GIL。这些是待实现、待验证事项，不是本初稿已完成的行为。待调度方提供精确实现 SHA 后，再集成并对齐异常契约、线程说明和实测记录。
+同步语言查询只缓存成功结果，异常不会被 `functools.cache` 缓存；缓存返回同一个可变列表，调用方不要修改。
 
-构建仅实现 Darwin；项目声明 macOS 13+/Python 3.11+，未显式固定 macOS deployment target。最低系统、x86_64、各 Python 版本及 wheel 覆盖不能由当前源码或单机结果推导。库不包含独立 OCR 模型或外部 OCR 服务，识别能力由系统 Vision 提供。
+## 所有权、GIL 与取消
+
+- 解析失败立即返回，成功获取的 `Py_buffer` 在出口释放；数据始终复制，包括只读 memoryview 对可变底层内存的视图。提示词转换为拥有自身数据的 NSString/NSArray。
+- 快照发生在原生工作线程处理输入时，不是 async 调用提交瞬间；调用方不要在工作线程尚未制作快照前修改共享输入。
+- 每调用有 autoreleasepool。ARC 管 ObjC；CF create/copy 引用由 finally 清理，Python 分配/追加失败保持异常并释放已持引用。ObjC 异常在桥接边界转为 Python 异常。
+- 仅 Vision `performRequests` 阶段释放 GIL，finally 恢复后才访问 Python。解析、快照、解码、语言查询等阶段仍持有 GIL；不承诺整个调用无阻塞或固定并发加速倍数。
+- 取消 await 只取消等待，已经启动的 Vision 工作可继续；输入快照继续存活到原生请求清理。`asyncio.run` 关闭默认 executor 时可能等待该工作结束。
+
+## 平台边界
+
+仅实现 Darwin；声明 macOS 13+/Python 3.11+，实测 macOS 26.6.2 arm64/Python 3.14.7。setup.py 未显式固定 deployment target；本环境构建使用 11.0，语言 API availability 警告及 wheel 标签见验证记录，不能据此宣称支持 macOS 11。
+
+未验证 macOS 13、x86_64、Python 3.11、free-threaded Python、EXIF 方向、透明 BGRA、内存耗尽及泄漏；无 Windows/Linux 实现或全格式承诺。OCR 不依赖外部服务或捆绑模型，识别结果随系统 Vision 能力而变。
