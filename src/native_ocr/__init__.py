@@ -20,7 +20,8 @@ __all__ = [
 def get_supported_languages() -> list[str]:
     """Return BCP-47 language codes supported by the Vision OCR engine.
 
-    The result is cached after the first call.
+    The successful result is cached after the first call. Vision query failures
+    raise RuntimeError and are not cached.
     """
     return get_supported_langs()
 
@@ -28,6 +29,10 @@ def get_supported_languages() -> list[str]:
 def _parse_roi(roi: BoundingBox | None) -> tuple[float, float, float, float]:
     if roi is None:
         return (0.0, 0.0, 1.0, 1.0)
+    if not isinstance(roi, dict):
+        raise TypeError("roi must be a BoundingBox dictionary")
+    if not all(key in roi for key in ("x", "y", "width", "height")):
+        raise TypeError("roi must contain x, y, width and height")
     return (roi["x"], roi["y"], roi["width"], roi["height"])
 
 
@@ -69,7 +74,9 @@ async def perform_ocr_on_bgra(
     """Run OCR on a raw BGRA8 pixel buffer.
 
     The buffer must be tightly packed with no row padding, i.e.
-    ``len(bgra) == width * height * 4``.
+    ``len(bgra) == width * height * 4``. Pixels use premultiplied alpha.
+    The native worker copies input data before releasing the GIL for Vision.
+    Cancelling the await does not stop an already running native request.
 
     Args:
         bgra: Raw pixel data in BGRA8 format (4 bytes per pixel, no padding).
@@ -79,13 +86,21 @@ async def perform_ocr_on_bgra(
             When False, result coordinates are in pixels.
         roi: Region of interest in normalised [0.0, 1.0] coordinates (top-left
             origin). None means the full image.
-        high_accuracy: When True, applies additional correction passes.
-        languages: BCP-47 language codes to restrict/prioritise recognition.
+        high_accuracy: True selects Vision accurate mode; False selects fast mode.
+        languages: BCP-47 language hints. None/[] uses system defaults.
         custom_words: Supplementary vocabulary. Only effective with high_accuracy.
+
+    Raises:
+        TypeError: Invalid argument types or incomplete ROI dictionary.
+        ValueError: Nonpositive dimensions, wrong buffer length, invalid ROI or NUL
+            in a hint. Unencodable strings raise UnicodeEncodeError (a ValueError).
+        OverflowError: Dimensions or buffer size cannot be represented.
+        RuntimeError: CoreGraphics/Vision failure or an Objective-C exception.
+        MemoryError: A checked allocation fails.
     """
     roi_tuple = _parse_roi(roi)
-    langs = languages or []
-    words = custom_words or []
+    langs = [] if languages is None else languages
+    words = [] if custom_words is None else custom_words
 
     raw: list[tuple[str, float, float, float, float]] = await asyncio.to_thread(
         _detect_bgra8, bgra, width, height, roi_tuple, high_accuracy, langs, words
@@ -104,8 +119,10 @@ async def perform_ocr_on_image(
 ) -> list[OcrResult]:
     """Run OCR on an encoded image file loaded into memory.
 
-    Accepts any format supported by the OS's built-in decoders. JPEG and PNG
-    are guaranteed; HEIC, TIFF, BMP, and WebP are available on most systems.
+    Formats depend on the system ImageIO decoders. Invalid or undecodable
+    data raises ValueError; a successfully recognised blank image returns [].
+    The native worker copies input data before releasing the GIL for Vision.
+    Cancelling the await does not stop an already running native request.
 
     Args:
         data: Raw bytes of an encoded image file.
@@ -113,13 +130,21 @@ async def perform_ocr_on_image(
             When False, result coordinates are in pixels.
         roi: Region of interest in normalised [0.0, 1.0] coordinates (top-left
             origin). None means the full image.
-        high_accuracy: When True, applies additional correction passes.
-        languages: BCP-47 language codes to restrict/prioritise recognition.
+        high_accuracy: True selects Vision accurate mode; False selects fast mode.
+        languages: BCP-47 language hints. None/[] uses system defaults.
         custom_words: Supplementary vocabulary. Only effective with high_accuracy.
+
+    Raises:
+        TypeError: Invalid argument types or incomplete ROI dictionary.
+        ValueError: Undecodable image, invalid ROI or NUL in a hint. Unencodable
+            strings raise UnicodeEncodeError (a ValueError).
+        OverflowError: Decoded dimensions cannot be represented.
+        RuntimeError: Vision failure or an Objective-C exception.
+        MemoryError: A checked allocation fails.
     """
     roi_tuple = _parse_roi(roi)
-    langs = languages or []
-    words = custom_words or []
+    langs = [] if languages is None else languages
+    words = [] if custom_words is None else custom_words
 
     raw, img_width, img_height = await asyncio.to_thread(
         _detect_image, data, roi_tuple, high_accuracy, langs, words

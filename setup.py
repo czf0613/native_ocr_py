@@ -13,7 +13,7 @@ match platform.system():
                     "native_code/osx/src/ext.c",
                     "native_code/osx/src/apple_ocr.m",
                 ],
-                extra_compile_args=["-fobjc-arc"],
+                extra_compile_args=["-fobjc-arc", "-fobjc-arc-exceptions"],
                 extra_link_args=[
                     "-framework",
                     "Vision",
