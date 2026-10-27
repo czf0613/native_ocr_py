@@ -1,9 +1,9 @@
 [project]
 name = "native_ocr_py"
 version = "0.0.2"
-description = "Call macOS/Windows built-in Vision OCR engine via Python C extension"
+description = "Call the macOS Vision OCR engine via a Python C extension"
 readme = "README.md"
-keywords = ["ocr", "vision", "macos", "windows", "c extension"]
+keywords = ["ocr", "vision", "macos", "c extension"]
 authors = [{ name = "Kevin Chen", email = "1354016594@qq.com" }]
 license = "MIT"
 requires-python = ">=3.11"

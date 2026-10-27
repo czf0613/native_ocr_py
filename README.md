@@ -1,164 +1,139 @@
 # native_ocr_py
 
-A Python library that exposes the **macOS Vision OCR engine** via a Python C extension — no third-party OCR service, no bundled models, no network calls. Uses the OS-native framework directly for fast, on-device text recognition.
+通过 Python C/Objective-C 扩展调用 **macOS Vision**，在本机识别图片文字；不调用外部 OCR 服务，也不捆绑模型。
 
-> **Platform support:** macOS only for now. Windows support is planned.
+## 环境与安装
 
----
+- 当前构建仅实现 macOS，不支持 Windows/Linux。
+- 项目声明 macOS 13+、Python 3.11+；开发环境由 `.python-version` 固定为 3.14。最低系统、最低 Python 版本及各 CPU 架构未在本轮验证。
+- 分发名为 `native_ocr_py`，导入名为 `native_ocr`，编译扩展为 `native_ocr._ocr_native`。
+- 源码构建需已安装 Xcode Command Line Tools/SDK 和 `uv`，使用 setuptools。CMake 仅用于 IDE 索引。
 
-## Requirements
-
-- macOS 13 or later (for Vision framework revision 3)
-- Python 3.11 or later
-
----
-
-## Installation
-
-Install from PyPI:
+在当前独立 checkout 的根目录执行：
 
 ```bash
-pip install native_ocr_py
+uv sync --locked
+uv run --no-sync python setup.py build_ext --inplace
+uv run --no-sync python -c 'import native_ocr; import native_ocr._ocr_native as ext; print(native_ocr.__file__); print(ext.__file__)'
+uv run --no-sync python examples/ocr_image.py tests/sample.png
 ```
 
-Because the package includes a compiled C extension, a pre-built wheel for your macOS architecture (arm64 / x86_64) must be available on PyPI. If no matching wheel is found, pip will attempt to build from source, which requires Xcode Command Line Tools:
+本轮未核验 PyPI 或预编译 wheel 的可用性；以上为源码构建步骤，尚未作为本轮原生验收执行。更多命令见[开发指南](docs/development.md)。
+
+## 文件输入示例
+
+示例只读取指定图片，打印实际 OCR 返回值，不采集屏幕。可用仓库的 `tests/sample.png`，或用户明确提供的图片路径：
 
 ```bash
-xcode-select --install
+uv run --no-sync python examples/ocr_image.py tests/sample.png --language zh-Hans
+uv run --no-sync python examples/ocr_image.py tests/sample.png --pixels
 ```
 
----
-
-## Quick start
+在已有 Python 程序中：
 
 ```python
 import asyncio
+from pathlib import Path
+
 import native_ocr
 
+
 async def main():
-    with open("screenshot.png", "rb") as f:
-        data = f.read()
-
+    data = Path("tests/sample.png").read_bytes()
     results = await native_ocr.perform_ocr_on_image(data, normalized=True)
+    for result in results:
+        box = result["position"]
+        print(result["content"], box["x"], box["y"])
 
-    for r in results:
-        print(r.content, r.position)
 
 asyncio.run(main())
 ```
 
----
+## 公共 API
 
-## API
-
-### `get_supported_languages() -> list[str]`
-
-Returns BCP-47 language codes supported by the Vision OCR engine (e.g. `"en-US"`, `"zh-Hans"`). The result is cached after the first call.
-
----
-
-### `await perform_ocr_on_image(data, normalized, *, roi, high_accuracy, languages, custom_words) -> list[OcrResult]`
-
-Run OCR on an encoded image loaded into memory. Accepts any format supported by the OS decoder — JPEG and PNG are guaranteed; HEIC, TIFF, BMP, and WebP are available on most systems.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `data` | `bytes` | — | Raw bytes of an encoded image file |
-| `normalized` | `bool` | — | `True` → result coordinates in `[0.0, 1.0]`; `False` → pixels |
-| `roi` | `BoundingBox \| None` | `None` | Region of interest in **normalised** coordinates. `None` = full image |
-| `high_accuracy` | `bool` | `True` | Use the accurate (slower) recognition level |
-| `languages` | `list[str] \| None` | `None` | BCP-47 hints from `get_supported_languages()`. `None` = auto-detect |
-| `custom_words` | `list[str] \| None` | `None` | Domain-specific vocabulary hints. Only applied when `high_accuracy=True` |
-
----
-
-### `await perform_ocr_on_bgra(bgra, width, height, normalized, *, roi, high_accuracy, languages, custom_words) -> list[OcrResult]`
-
-Run OCR on a raw BGRA8 pixel buffer. Useful when you already have decoded pixel data (e.g. from a screen capture or camera frame) and want to avoid re-encoding.
-
-The buffer must be tightly packed: `len(bgra) == width * height * 4`.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `bgra` | `bytes` | — | Raw BGRA8 pixel data, no row padding |
-| `width` | `int` | — | Image width in pixels |
-| `height` | `int` | — | Image height in pixels |
-| `normalized` | `bool` | — | `True` → result coordinates in `[0.0, 1.0]`; `False` → pixels |
-| `roi` | `BoundingBox \| None` | `None` | Region of interest in **normalised** coordinates. `None` = full image |
-| `high_accuracy` | `bool` | `True` | Use the accurate (slower) recognition level |
-| `languages` | `list[str] \| None` | `None` | BCP-47 hints. `None` = auto-detect |
-| `custom_words` | `list[str] \| None` | `None` | Domain-specific vocabulary hints. Only applied when `high_accuracy=True` |
-
----
-
-### `BoundingBox`
+以下签名与当前 Python 包装层一致；`normalized` 必填，可选参数也允许位置传参，没有 keyword-only 的 `*`。
 
 ```python
-@dataclass
-class BoundingBox:
-    x: float      # distance from left edge
-    y: float      # distance from top edge
-    width: float
-    height: float
+def get_supported_languages() -> list[str]: ...
+
+async def perform_ocr_on_image(
+    data: bytes,
+    normalized: bool,
+    roi: BoundingBox | None = None,
+    high_accuracy: bool = True,
+    languages: list[str] | None = None,
+    custom_words: list[str] | None = None,
+) -> list[OcrResult]: ...
+
+async def perform_ocr_on_bgra(
+    bgra: bytes,
+    width: int,
+    height: int,
+    normalized: bool,
+    roi: BoundingBox | None = None,
+    high_accuracy: bool = True,
+    languages: list[str] | None = None,
+    custom_words: list[str] | None = None,
+) -> list[OcrResult]: ...
 ```
 
-Top-left-origin coordinate rectangle. When used as `roi` input, always normalised. When returned in `OcrResult`, normalised or pixel depending on the `normalized` flag.
+| 参数/接口 | 约定 |
+| --- | --- |
+| `data` | 编码图片文件的完整字节。通过系统 ImageIO 解码第 0 帧；格式能力取决于系统，不承诺逐一验证所有格式或多帧识别。 |
+| `bgra`, `width`, `height` | 已解码的 BGRA8 字节和正整数像素尺寸。每像素 B、G、R、A 四字节，无行填充；必须严格满足 `len(bgra) == width * height * 4`。原生使用预乘 alpha；透明像素的颜色通道需预乘，完全不透明图可用 A=255。 |
+| `normalized` | `True` 返回归一化坐标；`False` 按原始整图宽高换算为像素坐标，数值仍为 `float`，不取整。 |
+| `roi` | 始终使用左上原点、归一化矩形，和 `normalized` 的取值无关；`None` 表示全图。合法输入需四项齐全且有限，`x,y >= 0`、`width,height > 0`、`x+width,y+height <= 1`。当前校验不完整，不能依赖它处理非法输入。 |
+| `high_accuracy` | `True` 选择 Vision accurate，`False` 选择 fast；不是本库显式执行多轮纠错。 |
+| `languages` | BCP-47 语言提示列表。`None` 或 `[]` 不设置 `recognitionLanguages`，使用系统默认语言配置；本库未启用自动语言检测。 |
+| `custom_words` | 补充词表，仅在 accurate 模式设置；不保证改善每次识别。 |
+| `get_supported_languages()` | 同步查询 accurate 模式的语言列表并缓存，不能据此保证 fast 模式同样支持。返回同一个可变列表，调用方应避免修改。当前失败也可能返回并缓存 `[]`。 |
 
----
+### 返回值与坐标
 
-### `OcrResult`
+`BoundingBox` 和 `OcrResult` 是 `TypedDict`，运行时都是字典，不能用属性访问：
 
 ```python
-@dataclass
-class OcrResult:
-    content: str        # recognised text, stripped, never empty
+from typing import TypedDict
+
+
+class BoundingBox(TypedDict):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class OcrResult(TypedDict):
+    content: str
     position: BoundingBox
 ```
 
----
+文本会去除两端空白并过滤空串。矩形以左上角为原点，x 向右、y 向下。原生层翻转 Vision 的 y 轴；Python 层用整幅解码图的宽高缩放，不按 ROI 重新缩放或偏移。局部 ROI 的实际坐标行为仍待 fixture 验证。
 
-## Examples
-
-### Restrict to a region of interest
+例如，以下片段接在异步函数中，`data` 为图片文件字节：
 
 ```python
-# Scan only the top-right quarter of the image
 roi = native_ocr.BoundingBox(x=0.5, y=0.0, width=0.5, height=0.5)
-results = await native_ocr.perform_ocr_on_image(data, normalized=True, roi=roi)
+results = await native_ocr.perform_ocr_on_image(data, False, roi)
+for result in results:
+    box = result["position"]
+    print(result["content"], box["x"], box["y"], box["width"], box["height"])
 ```
 
-### Pixel coordinates
+## 当前限制与接管状态
 
-```python
-results = await native_ocr.perform_ocr_on_image(data, normalized=False)
-for r in results:
-    print(f"{r.content!r} at ({r.position.x:.0f}, {r.position.y:.0f})")
-```
+本初稿依据固定输入 `819f41413f22812eb25c64c0efd04cad0d5b3107` 的源码，尚未集成实现 Agent 的修复。详见[接管计划](docs/codex-takeover-plan-20261027.md)和[架构说明](docs/architecture.md)。
 
-### OCR from a raw screen capture buffer
+- 正常无文字可返回 `[]`；当前部分解码、图像创建、语言查询及 Vision 失败也返回空结果，因此 `[]` 不能证明识别成功。
+- 参数解析、尺寸/缓冲区、ROI、字符串和分配错误处理尚有安全缺口；类型注解/stub 不做运行时校验。不要将非法输入直接用于当前原生入口。
+- 两个 OCR API 通过 `asyncio.to_thread` 调同步扩展；当前原生 Vision 调用没有显式释放 GIL，不能保证事件循环响应性或并行加速。取消等待不会可靠终止已经开始的原生请求。
+- 更明确的 Python 异常、资源清理和 GIL 处理属于待集成、待验证变更；本轮只检查文档与示例语法，不宣称原生功能通过。
+- 未固定 Vision request revision；未显式传入 EXIF orientation，也未验证透明 BGRA、方向元数据和各系统格式边界。
 
-```python
-async def ocr_frame(bgra_bytes: bytes, width: int, height: int):
-    return await native_ocr.perform_ocr_on_bgra(
-        bgra_bytes, width, height,
-        normalized=True,
-        high_accuracy=False,   # faster for real-time use
-    )
-```
+## 维护入口
 
-### Language hints
-
-```python
-langs = native_ocr.get_supported_languages()
-print(langs)  # ['en-US', 'zh-Hans', 'zh-Hant', 'ja-JP', ...]
-
-results = await native_ocr.perform_ocr_on_image(
-    data, normalized=True, languages=["zh-Hans", "en-US"]
-)
-```
-
----
+统一规则见 [AGENTS.md](AGENTS.md)，开发步骤见[开发指南](docs/development.md)。本次接管仅向指定测试分支交付，不更新默认分支，不执行发布流程。
 
 ## License
 
-MIT
+[MIT](LICENSE)
